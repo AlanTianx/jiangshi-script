@@ -247,14 +247,14 @@ def choseJN(auto : WindowAutomation, target_window, q):
                 q.put("tuichu")
                 i=0
         else:
-            time.sleep(3)
+            time.sleep(1)
 
 # 选择JN-之选中间的
 def tuiyou(auto : WindowAutomation, target_window):
     print("5级退出游戏")
 
     auto.click_in_window(target_window,38, 67)
-    time.sleep(0.5)
+    time.sleep(1)
 
     window_image = auto.capture_window(target_window)
     res = auto.find_image_in_window(
@@ -268,7 +268,7 @@ def tuiyou(auto : WindowAutomation, target_window):
     
         auto.click_in_window(target_window,center_x, center_y)
 
-        time.sleep(0.5)
+        time.sleep(0.8)
 
         window_image1 = auto.capture_window(target_window)
         res2 = auto.find_image_in_window(
@@ -306,7 +306,7 @@ def saodang(auto : WindowAutomation, target_window):
             tuiyou(auto,target_window)
             i = i+1
             print(f"退出游戏成功,扫荡结束 当前扫荡成功次数 {i}")
-        time.sleep(60)
+        time.sleep(5)
 
 if __name__ == "__main__":
     logging.basicConfig(
