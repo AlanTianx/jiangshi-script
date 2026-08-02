@@ -1,3 +1,12 @@
 /dist
 /build
 .app.log
+.venv/
+__pycache__/
+*.pyc
+app.log
+# 便携 Tesseract 体积较大，本地用 scripts/setup_tesseract.ps1 生成
+/tesseract/**/*.dll
+/tesseract/**/*.exe
+/tesseract/tessdata/*.traineddata
+!/tesseract/README.txt
