@@ -7,18 +7,26 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
-# Keep same name as main.spec EXE/COLLECT name
-$AppName = [string]([char]0x50EB) + [string]([char]0x5C38) + [string]([char]0x52A9) + [string]([char]0x624B)  # 僵尸助手
-$ZipSuffix = [string]([char]0x7EFF) + [string]([char]0x8272) + [string]([char]0x7248)  # 绿色版
 $VenvPython = Join-Path $Root ".venv\Scripts\python.exe"
 $VenvPip = Join-Path $Root ".venv\Scripts\pip.exe"
 $Spec = Join-Path $Root "main.spec"
-$DistDir = Join-Path $Root ("dist\" + $AppName)
-$ZipPath = Join-Path $Root ("dist\" + $AppName + "-" + $ZipSuffix + ".zip")
 $TessExe = Join-Path $Root "tesseract\tesseract.exe"
 $ChiData = Join-Path $Root "tesseract\tessdata\chi_sim.traineddata"
 
+# 从 main.spec 读取 EXE/COLLECT 名称，避免脚本编码问题
+$AppName = $null
+foreach ($line in Get-Content -LiteralPath $Spec -Encoding UTF8) {
+    if ($line -match '^\s*name\s*=\s*"(.+)"\s*,?\s*$') {
+        $AppName = $Matches[1]
+        break
+    }
+}
+if (-not $AppName) {
+    throw "cannot parse app name from main.spec"
+}
+
 Write-Host "==> workdir: $Root"
+Write-Host "==> app name: $AppName"
 
 if (-not (Test-Path $Spec)) {
     throw "main.spec not found: $Spec"
@@ -45,11 +53,29 @@ if ($LASTEXITCODE -ne 0) {
     throw "PyInstaller failed, exit=$LASTEXITCODE"
 }
 
-$ExePath = Join-Path $DistDir ($AppName + ".exe")
-if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw "exe not found: $ExePath"
+# 以 dist 下实际目录为准（兼容编码差异）
+$DistDir = Join-Path $Root ("dist\" + $AppName)
+if (-not (Test-Path -LiteralPath $DistDir)) {
+    $found = Get-ChildItem -LiteralPath (Join-Path $Root "dist") -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName ($_.Name + ".exe")) } |
+        Select-Object -First 1
+    if (-not $found) {
+        throw "dist app folder not found under dist\"
+    }
+    $DistDir = $found.FullName
+    $AppName = $found.Name
 }
 
+$ExePath = Join-Path $DistDir ($AppName + ".exe")
+if (-not (Test-Path -LiteralPath $ExePath)) {
+    $exeHit = Get-ChildItem -LiteralPath $DistDir -Filter "*.exe" | Select-Object -First 1
+    if (-not $exeHit) {
+        throw "exe not found in: $DistDir"
+    }
+    $ExePath = $exeHit.FullName
+}
+
+$ZipPath = Join-Path $Root ("dist\" + $AppName + "-green.zip")
 Write-Host "==> zip for distribution ..."
 New-Item -ItemType Directory -Force -Path (Join-Path $Root "dist") | Out-Null
 if (Test-Path -LiteralPath $ZipPath) {
@@ -69,4 +95,4 @@ Write-Host "BUILD OK"
 Write-Host ("  dir : {0}  ({1} MB)" -f $DistDir, $dirMb)
 Write-Host ("  exe : {0}  ({1} MB)" -f $exe.FullName, $exeMb)
 Write-Host ("  zip : {0}  ({1} MB)" -f $zip.FullName, $zipMb)
-Write-Host "Send the zip folder to others; do not send exe alone."
+Write-Host "Send the zip to others; do not send exe alone."
