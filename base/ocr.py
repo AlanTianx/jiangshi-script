@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 import pytesseract
 
+from base.cv_io import imread as imread_unicode
 from base.paths import app_dir, resource_path
 
 logger = logging.getLogger(__name__)
@@ -510,7 +511,8 @@ def load_huan_digit_templates(
     if _huan_digit_templates is not None:
         return _huan_digit_templates
 
-    huan = cv2.imread(huan_path)
+    # 支持中文路径（绿色包目录名可能含中文）
+    huan = imread_unicode(huan_path)
     out: dict[int, np.ndarray] = {}
     if huan is None:
         logger.warning("无法加载 huan.png，跳过难度数字模板: %s", huan_path)
@@ -519,7 +521,7 @@ def load_huan_digit_templates(
 
     hh, hw = huan.shape[:2]
     for n, path in sorted(sample_paths.items(), reverse=True):
-        im = cv2.imread(path)
+        im = imread_unicode(path)
         if im is None:
             continue
         # 样本可能比 huan 矮/窄，先垫边再匹配

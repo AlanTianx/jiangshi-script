@@ -27,6 +27,7 @@ from base.click_probe import (
     ClickProbeResult,
     probe_click_backend,
 )
+from base.cv_io import imread as imread_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -300,12 +301,15 @@ class WindowAutomation:
         return cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
 
     def _load_template_gray(self, template_path: str):
-        """读取并缓存灰度模板图。"""
+        """读取并缓存灰度模板图（支持中文路径）。"""
         cached = self._template_gray_cache.get(template_path)
         if cached is not None:
             return cached
-        template = cv2.imread(template_path, cv2.IMREAD_GRAYSCALE)
+        # 勿用 cv2.imread：打包目录名含中文时会读失败
+        template = imread_unicode(template_path, cv2.IMREAD_GRAYSCALE)
         if template is None:
+            if os.path.isfile(template_path):
+                raise FileNotFoundError(f"模板图像无法解码: {template_path}")
             raise FileNotFoundError(f"模板图像不存在: {template_path}")
         self._template_gray_cache[template_path] = template
         return template
@@ -487,8 +491,10 @@ class WindowAutomation:
         region: {x, y, width, height}
         命中额外包含 center_x / center_y。
         """
-        button_template = cv2.imread(button_image_path, cv2.IMREAD_GRAYSCALE)
+        button_template = imread_unicode(button_image_path, cv2.IMREAD_GRAYSCALE)
         if button_template is None:
+            if os.path.isfile(button_image_path):
+                raise FileNotFoundError(f"按钮模板无法解码: {button_image_path}")
             raise FileNotFoundError(f"按钮模板图像不存在: {button_image_path}")
 
         x, y, w, h = region["x"], region["y"], region["width"], region["height"]

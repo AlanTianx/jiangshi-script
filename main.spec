@@ -38,7 +38,9 @@ hiddenimports = [
     "base.paths",
     "base.click_probe",
     "base.ocr",
+    "base.cv_io",
     "ui",
+    "windnd",
 ]
 
 a = Analysis(
