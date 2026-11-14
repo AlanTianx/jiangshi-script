@@ -44,7 +44,7 @@ QIANGHUAN_CARD_H = 90
 # 点卡后短确认入队；仍停在招募列表则立刻续抢（不宜过长，易被抢走）
 QIANGHUAN_JOIN_DETECT_SEC = 0.85
 QIANGHUAN_JOIN_POLL = 0.1
-# 入队后等待开战；超时则离队继续抢环
+# 入队后等待开战；超时不离队，直接回招募续抢
 QIANGHUAN_BATTLE_START_WAIT = 5.0
 # 抢环卡点击后延迟（秒），短于全局 post_click_delay
 QIANGHUAN_CLICK_DELAY = 0.06
@@ -483,11 +483,25 @@ class TaskController:
                 return int(n)
         return None
 
+    def _huan_digit_templates(self):
+        """加载 image/8.png~20.png 裁出的难度数字模板（缓存于 ocr 模块）。"""
+        import os
+
+        from base import ocr as ocr_mod
+
+        samples = {}
+        for n in range(8, 21):
+            p = resource_path("image", f"{n}.png")
+            if os.path.isfile(p):
+                samples[n] = p
+        return ocr_mod.load_huan_digit_templates(IMG_HUAN, samples)
+
     def _parse_huan_difficulty(self, window_image, huan_loc) -> int | None:
         """
-        纯 OCR 识别「寰球救援-难度XX」（不用数字模板匹配）。
-        主路径：含「难度」整行 chi_sim；辅路径：右侧数字条 eng。
-        重点保证 10~20。
+        识别「寰球救援-难度XX」：
+        1) OCR 整行（含「难度」）
+        2) OCR 右侧数字条
+        3) 失败则用 8~20 数字模板回退（避免 OCR 空结果一直拒）
         """
         from base import ocr as ocr_mod
 
@@ -497,51 +511,88 @@ class TaskController:
         hw = int(huan_loc["width"])
         hh = max(14, int(huan_loc["height"]))
 
-        # 含「难度」+ 两位数（主 ROI）
+        # 含「难度」+ 两位数（略放大，容错定位偏差）
+        line_x = max(0, hx + max(0, hw - 52))
         line_region = {
-            "x": max(0, hx + max(0, hw - 44)),
-            "y": max(0, hy - 4),
-            "width": min(96, WINDOW_WIDTH_SAFE - max(0, hx + max(0, hw - 44))),
-            "height": max(22, hh + 10),
+            "x": line_x,
+            "y": max(0, hy - 6),
+            "width": min(120, WINDOW_WIDTH_SAFE - line_x),
+            "height": max(28, hh + 14),
         }
-        # 纯数字条（不重叠「难度」，避免橙字掩膜吃进汉字）
+        # 纯数字条（不重叠「难度」汉字）
+        digit_x = min(WINDOW_WIDTH_SAFE - 12, max(0, hx + hw))
         digit_region = {
-            "x": min(WINDOW_WIDTH_SAFE - 10, max(0, hx + hw + 1)),
-            "y": max(0, hy - 4),
-            "width": 44,
-            "height": max(22, hh + 10),
+            "x": digit_x,
+            "y": max(0, hy - 6),
+            "width": min(56, WINDOW_WIDTH_SAFE - digit_x),
+            "height": max(28, hh + 14),
         }
 
-        line_texts = ocr_mod.read_difficulty_line_texts(
-            window_image, region=line_region
-        )
-        n = self._pick_difficulty_from_ocr_texts(line_texts)
+        ocr_ok = ocr_mod.is_available()
+        if not ocr_ok:
+            self.log(f"OCR 不可用，将尝试数字模板：{ocr_mod.status_text()}")
+
+        line_texts: list[str] = []
         digit_strs: list[str] = []
-        if n is None or not (10 <= int(n) <= 20):
-            digit_strs = self.auto.read_difficulty_digits(
-                window_image, region=digit_region
+        n: int | None = None
+        method = ""
+
+        if ocr_ok:
+            line_texts = ocr_mod.read_difficulty_line_texts(
+                window_image, region=line_region
             )
-            n2 = self._pick_difficulty_from_ocr_texts(digit_strs)
-            # 整行未给出 10~20 时采用数字条；若整行已是 10~20 则保留
-            if n is None:
-                n = n2
-            elif n2 is not None and 10 <= int(n2) <= 20:
-                # 两边都有 10~20 时以整行「难度XX」为准（上面已优先）
-                pass
+            n = self._pick_difficulty_from_ocr_texts(line_texts)
+            if n is not None:
+                method = "OCR整行"
+            if n is None or not (10 <= int(n) <= 20):
+                digit_strs = self.auto.read_difficulty_digits(
+                    window_image, region=digit_region
+                )
+                n2 = self._pick_difficulty_from_ocr_texts(digit_strs)
+                if n is None and n2 is not None:
+                    n = n2
+                    method = "OCR数字条"
+                elif (
+                    n is not None
+                    and not (10 <= int(n) <= 20)
+                    and n2 is not None
+                    and 10 <= int(n2) <= 20
+                ):
+                    n = n2
+                    method = "OCR数字条"
 
         texts_for_log = list(line_texts) + list(digit_strs)
         self._last_huan_ocr_text = " | ".join(texts_for_log) if texts_for_log else ""
 
+        # OCR 空/失败：模板匹配右侧数字（本地样本 8~20.png）
+        if n is None:
+            try:
+                tpls = self._huan_digit_templates()
+                n_tpl, sc, _ = ocr_mod.match_difficulty_by_template(
+                    window_image,
+                    digit_region,
+                    tpls,
+                    threshold=0.86,
+                    min_margin=0.006,
+                )
+                if n_tpl is not None:
+                    n = int(n_tpl)
+                    method = f"数字模板(分={sc:.3f})"
+                    if not self._last_huan_ocr_text:
+                        self._last_huan_ocr_text = f"template={n}"
+            except Exception as exc:
+                self.log(f"数字模板回退异常: {exc}")
+
         if n is not None:
             self.log(
-                f"环难度识别成功：值={n}（int） 方式=OCR "
+                f"环难度识别成功：值={n}（int） 方式={method or 'OCR'} "
                 f"原文={self._last_huan_ocr_text[:80]!r}"
             )
             return int(n)
 
         self.log(
             f"环难度识别失败：未匹配难度20~1 "
-            f"line_region={line_region} "
+            f"ocr_ok={ocr_ok} line={line_region} digit={digit_region} "
             f"OCR原文={self._last_huan_ocr_text[:80]!r}"
         )
         return None
@@ -1121,31 +1172,96 @@ class TaskController:
         self.log(f"招募卡点击正中 ({cx},{cy})")
         return True
 
+    def _is_team_channel_panel(self, window_image=None) -> bool:
+        """
+        消息弹层是否打开（标题「组队频道」/「招募频道」）。
+        仅用于判断是否还要点消息入口，不表示已在可抢卡列表。
+        """
+        if window_image is None:
+            window_image = self._capture()
+            if window_image is None:
+                return False
+        if self._template_visible(IMG_ZHAOMUPD, threshold=0.7, window_image=window_image):
+            return True
+        try:
+            if self.auto.find_text_in_window(
+                window_image, "组队频道", threshold=0.5
+            ):
+                return True
+            if self.auto.find_text_in_window(
+                window_image, "招募频道", threshold=0.5
+            ):
+                return True
+        except Exception:
+            pass
+        return False
+
     def _is_zhaomu_channel(self, window_image=None) -> bool:
-        """是否已在招募频道（左侧「招募」选中态 zhaomupd.png）。"""
+        """是否已在招募频道（标题 zhaomupd.png，或已出现抢环卡）。"""
+        if window_image is None:
+            window_image = self._capture()
+            if window_image is None:
+                return False
+        if self._find_bottom_qianghuan_card(window_image):
+            return True
         return bool(
             self._template_visible(IMG_ZHAOMUPD, threshold=0.72, window_image=window_image)
         )
 
+    def _click_zhaomu_tab(self) -> bool:
+        """点击左侧「招募」页签：模板优先，失败再 OCR。"""
+        if self._click_template(IMG_ZHAOMU, threshold=0.65):
+            self.log("已点击「招募」按钮（模板）")
+            return True
+        if self._click_text("招募", threshold=0.5):
+            self.log("已点击「招募」按钮（OCR）")
+            return True
+        return False
+
     def _open_zhaomu_channel(self) -> bool:
         """
-        未在招募频道时：先点消息 chat.png，再点招募 zhaomu.png。
-        任一步成功推进 UI 则返回 True。
+        打开消息 → 点招募，进入可抢卡界面。
+        成功条件：出现抢环卡或「招募频道」标题；列表空不算成功。
         """
-        if self._click_template(IMG_CHAT, threshold=0.7):
-            self.log("未在招募频道：已点击消息按钮")
-            if self._wait(0.45):
-                return True
-        else:
-            self.log("未在招募频道：未找到消息按钮")
-
-        if self._click_template(IMG_ZHAOMU, threshold=0.7):
-            self.log("已点击「招募」按钮")
-            if self._wait(0.45):
-                return True
+        img = self._capture()
+        if img is None:
+            return False
+        if self._is_zhaomu_channel(img):
             return True
 
-        self.log("未找到「招募」按钮")
+        panel_open = self._is_team_channel_panel(img)
+        if not panel_open:
+            if self._click_template(IMG_CHAT, threshold=0.65):
+                self.log("未在招募频道：已点击消息按钮")
+                if self._wait(0.55):
+                    return True
+            else:
+                self.log("未在招募频道：未找到消息按钮")
+            if self._wait(0.15):
+                return True
+
+        # 弹层内点「招募」，最多 3 次
+        for attempt in range(1, 4):
+            if self.stop_event.is_set():
+                return False
+            if self._click_zhaomu_tab():
+                if self._wait(0.55):
+                    return True
+            else:
+                self.log(f"未找到「招募」按钮（第 {attempt} 次）")
+                if self._wait(0.25):
+                    return False
+                continue
+
+            check = self._capture()
+            if check is None:
+                return False
+            if self._is_zhaomu_channel(check):
+                self.log("已进入招募频道")
+                return True
+            self.log(f"点击招募后未进入频道，重试（{attempt}/3）…")
+
+        self.log("多次点击「招募」仍未进入频道")
         return False
 
     def _wait_start_visible(self, window_image=None) -> bool:
@@ -1162,8 +1278,9 @@ class TaskController:
         """
         点卡后短确认入队：
         - 很快仍见招募列表 → 立刻续抢（不等满检测窗）；
-        - 出现 wait-start → 再等开战/超时离队；
-        - 检测窗内无 wait-start → 马上续抢。
+        - 出现 wait-start → 再等开战；
+        - 超时未开战 → 不离队，直接点消息回招募续抢；
+        - 已开战 → 暂停抢环，等结算返回后再继续。
         """
         joined = False
         t0 = time.time()
@@ -1190,7 +1307,7 @@ class TaskController:
         # 入队后等开战
         self.log(
             f"等待进入战斗（最长 {QIANGHUAN_BATTLE_START_WAIT:.0f}s，"
-            f"超时则离队继续抢环）…"
+            f"超时不离队，直接回招募续抢）…"
         )
         deadline = time.time() + QIANGHUAN_BATTLE_START_WAIT
         while not self.stop_event.is_set() and time.time() < deadline:
@@ -1202,32 +1319,36 @@ class TaskController:
                     return
                 continue
 
+            # 仍在招募频道或列表 → 不是战斗
             if self._is_zhaomu_channel(img) or self._find_bottom_qianghuan_card(img):
                 self.log("已离开等待界面且回到招募列表，继续抢环")
                 return
-            self.log("已进入战斗，等待结束后再继续抢环")
-            # 抢环禁用 OCR「返回」，避免战斗中误点后继续狂点消息/招募
+            # 开战：暂停抢环，等结算「返回」后再继续
+            self.log("已进入战斗，暂停抢环，等待结束后再继续")
             self._wait_battle_end_and_return(use_ocr=False)
             return
 
         if self.stop_event.is_set():
             return
+        # 超时未开战：不走离队，直接点聊天进招募选新卡
         self.log(
-            f"等待开战超过 {QIANGHUAN_BATTLE_START_WAIT:.0f}s，执行离队后继续抢环"
+            f"等待开战超过 {QIANGHUAN_BATTLE_START_WAIT:.0f}s，"
+            f"不离队，点击消息回到招募续抢"
         )
-        self._leave_team()
+        self._open_zhaomu_channel()
         if self._wait(0.35):
             return
 
     def _run_qianghuan(self):
         """
-        串行招募抢环：高频点最下方卡片；入队后再走开战/离队逻辑。
-        战斗中只等 return.png，不点消息/招募。
+        串行招募抢环：高频点最下方卡片；
+        超时未开战则回招募续抢；开战则等结算后再继续。
         """
         clicks = 0
         self.log(
             "招募抢环开始：快速抢卡→短确认入队→"
-            f"{QIANGHUAN_BATTLE_START_WAIT:.0f}s 未开战则离队续抢"
+            f"{QIANGHUAN_BATTLE_START_WAIT:.0f}s 未开战则回招募续抢；"
+            "开战则等结算后继续"
         )
 
         while not self.stop_event.is_set():
@@ -1259,25 +1380,32 @@ class TaskController:
                         break
                     continue
 
-                # 仍在组队等待：交给入队后逻辑，勿点消息
+                # 仍在组队等待：继续等开战/超时回招募
                 if self._wait_start_visible(window_image):
-                    self.log("仍在等待开战界面，继续等待/超时离队逻辑")
+                    self.log("仍在等待开战界面，继续等待或超时回招募")
                     self._after_qianghuan_join()
                     continue
 
-                # 消息/招募都找不到 → 多半还在战斗，阻塞等到结算
+                # 消息/招募都找不到：多为过渡页/弹层，勿当成战斗卡住
+                # （开战等待只在 _after_qianghuan_join 里、确认入队后触发）
                 chat_ok = self._template_visible(
-                    IMG_CHAT, 0.7, window_image
+                    IMG_CHAT, 0.65, window_image
                 )
                 zhaomu_ok = self._template_visible(
-                    IMG_ZHAOMU, 0.7, window_image
+                    IMG_ZHAOMU, 0.65, window_image
                 )
                 if not chat_ok and not zhaomu_ok:
-                    self.log(
-                        "未回到大厅（无消息/招募按钮），等待战斗结束…"
-                    )
-                    self._wait_battle_end_and_return(use_ocr=False)
-                    if self._wait(0.3):
+                    # 若恰好停在结算页，点返回即可
+                    if self._click_template(IMG_RETURN, threshold=0.78):
+                        self.log("非大厅界面：已点击结算「返回」")
+                        if self._wait(1.0):
+                            break
+                        continue
+                    self.log("暂未看到消息/招募按钮，稍后重试打开招募…")
+                    if self._wait(0.35):
+                        break
+                    self._open_zhaomu_channel()
+                    if self._wait(0.2):
                         break
                     continue
 
@@ -1318,7 +1446,7 @@ class TaskController:
         self._start("主动邀请", self._run_me_invite)
 
     def start_qianghuan(self):
-        """启动招募抢环：抢卡入队→等开战/离队续抢→开战则等返回。"""
+        """启动招募抢环：抢卡入队→等开战；超时回招募续抢；开战则等返回后再抢。"""
         self._start("招募抢环", self._run_qianghuan)
 
     def _start(self, task_name, func):
